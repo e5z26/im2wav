@@ -105,6 +105,27 @@ def make_vqvae(hps, device='cuda'):
 def make_prior(hps, vqvae, device='cuda'):
     from models.prior.prior import SimplePrior
 
+    # Calculate actual code length from VQVAE for this level
+    downsamples = calculate_strides(vqvae.strides_t, vqvae.downs_t)
+    raw_to_tokens = np.prod(downsamples[:hps.level+1])
+    actual_code_length = vqvae.z_shapes[hps.level][0]  # Actual code length from VQVAE
+    
+    # If n_ctx was manually set, check if it matches actual code length
+    if hps.n_ctx != actual_code_length:
+        print_all(f"Note: n_ctx={hps.n_ctx} doesn't match VQVAE code length={actual_code_length} for level {hps.level}. "
+                  f"Using actual code length.")
+        hps.n_ctx = actual_code_length
+    
+    # Ensure n_ctx is divisible by blocks (required by transformer)
+    if hps.blocks is not None and hps.n_ctx % hps.blocks != 0:
+        original_n_ctx = hps.n_ctx
+        # Round down to nearest multiple of blocks
+        hps.n_ctx = (hps.n_ctx // hps.blocks) * hps.blocks
+        adjusted_sample_length = hps.n_ctx * raw_to_tokens
+        print_all(f"Warning: n_ctx={original_n_ctx} is not divisible by blocks={hps.blocks}. "
+                  f"Adjusting n_ctx to {hps.n_ctx} (effective sample_length will be {adjusted_sample_length} instead of {hps.sample_length})")
+        print_all(f"This may cause shape mismatches. Consider using sample_length={adjusted_sample_length} or changing blocks.")
+
     prior_kwargs = dict(input_shape=(hps.n_ctx,), bins=vqvae.l_bins,
                         width=hps.prior_width, depth=hps.prior_depth, heads=hps.heads,
                         attn_order=hps.attn_order, blocks=hps.blocks, spread=hps.spread,
@@ -120,9 +141,14 @@ def make_prior(hps, vqvae, device='cuda'):
                          zero_out=hps.cond_zero_out, res_scale=hps.cond_res_scale,
                          checkpoint_res=hps.cond_c_res)  # have to keep this else names wrong
 
+    # Set default min_duration if not specified (same logic as dataset)
+    import math
+    min_duration = hps.min_duration if hps.min_duration is not None else math.ceil(hps.sample_length / hps.sr)
+    max_duration = hps.max_duration if hps.max_duration is not None else 600.0
+    
     y_cond_kwargs = dict(out_width=hps.prior_width, init_scale=hps.init_scale,
-                         y_bins=hps.y_bins, t_bins=hps.t_bins, sr= hps.sr, min_duration=hps.min_duration,
-                         max_duration=hps.max_duration, max_bow_genre_size=hps.max_bow_genre_size, clip_emb=hps.clip_emb, video_clip_emb=hps.video_clip_emb, class_free_guidance_prob=hps.class_free_guidance_prob)
+                         y_bins=hps.y_bins, t_bins=hps.t_bins, sr= hps.sr, min_duration=min_duration,
+                         max_duration=max_duration, max_bow_genre_size=hps.max_bow_genre_size, clip_emb=hps.clip_emb, video_clip_emb=hps.video_clip_emb, class_free_guidance_prob=hps.class_free_guidance_prob)
 
     if hps.use_tokens and not hps.single_enc_dec:
         prime_kwargs = dict(use_tokens=hps.use_tokens, prime_loss_fraction=hps.prime_loss_fraction,
@@ -139,7 +165,7 @@ def make_prior(hps, vqvae, device='cuda'):
     else:
         prime_kwargs = dict(use_tokens=hps.use_tokens, prime_loss_fraction=hps.prime_loss_fraction,
                             n_tokens=hps.n_tokens, bins=hps.n_vocab)
-
+    
     # z_shapes for other levels given this level gets n_ctx codes
     rescale = lambda z_shape: (z_shape[0]*hps.n_ctx//vqvae.z_shapes[hps.level][0],)
     z_shapes = [rescale(z_shape) for z_shape in vqvae.z_shapes]

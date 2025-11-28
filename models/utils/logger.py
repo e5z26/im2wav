@@ -83,6 +83,7 @@ class Logger:
         self.rank = rank
         self.works = []
         self.logdir = logdir
+        self._audio_logging_disabled = False
 
     def step(self):
         self.iters += 1
@@ -95,17 +96,24 @@ class Logger:
         if self.rank == 0:
             self.sw.add_text(tag, text, self.iters)
 
+    def _try_add_audio(self, tag, aud, sample_rate):
+        if self._audio_logging_disabled:
+            return
+        try:
+            self.sw.add_audio(tag, aud, self.iters, sample_rate)
+        except MemoryError as exc:
+            print(f"[logger] Disabling audio logging due to error: {exc}")
+            self._audio_logging_disabled = True
+
     def add_audios(self, tag, auds, sample_rate=22050, max_len=None, max_log=8):
         if self.rank == 0:
             for i in range(min(len(auds), max_log)):
-                if max_len:
-                    self.sw.add_audio(f"{i}/{tag}", auds[i][:max_len * sample_rate], self.iters, sample_rate)
-                else:
-                    self.sw.add_audio(f"{i}/{tag}", auds[i], self.iters, sample_rate)
+                clip = auds[i][:max_len * sample_rate] if max_len else auds[i]
+                self._try_add_audio(f"{i}/{tag}", clip, sample_rate)
 
     def add_audio(self, tag, aud, sample_rate=22050):
         if self.rank == 0:
-            self.sw.add_audio(tag, aud, self.iters, sample_rate)
+            self._try_add_audio(tag, aud, sample_rate)
 
     def add_images(self, tag, img, dataformats="NHWC"):
         if self.rank == 0:

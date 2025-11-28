@@ -52,10 +52,16 @@ class FilesAudioDataset(Dataset):
                     filter.append(i)
                     continue
             if self.clip_emb:
-                # if fname not in self.file2CLIP:
-                if not os.path.exists(os.path.join(self.CLIP_path, f'{fname}.pickle')):
-                    filter.append(i)
-                    continue
+                # For image CLIP embeddings, check if name exists in loaded dictionary
+                if self.image_clip_emb:
+                    if fname not in self.file2CLIP:
+                        filter.append(i)
+                        continue
+                else:
+                    # For video CLIP embeddings, check for individual pickle files
+                    if not os.path.exists(os.path.join(self.CLIP_path, f'{fname}.pickle')):
+                        filter.append(i)
+                        continue
             if durations[i] == -1:
                 filter.append(i)
                 continue
@@ -70,18 +76,29 @@ class FilesAudioDataset(Dataset):
     def init_dataset(self, hps):
         self.image_clip_emb = True
         # Load list of files and starts/durations
-        files = librosa.util.find_files(f'{hps.audio_files_dir}', ['mp3', 'opus', 'm4a', 'aac', 'wav'])
+        files = librosa.util.find_files(f'{hps.audio_files_dir}', ext=['mp3', 'opus', 'm4a', 'aac', 'wav'])
         print_all(f"Found {len(files)} files. Getting durations")
         cache = dist.get_rank() % 8 == 0 if dist.is_available() else True
         cache = True
         durations = np.array([get_duration_sec(file, cache=cache) * self.sr for file in files])  # Could be approximate
         self.clip_emb = hps.clip_emb
         self.video_clip_emb = hps.video_clip_emb
-        if self.clip_emb and self.image_clip_emb:
-            self.max_duration = 10.5
+        self.file2CLIP = {}  # Initialize to avoid AttributeError
+        # Note: Removed hardcoded max_duration=10.5 as it was filtering out all files
+        # max_duration is already set from hps or defaults to inf in __init__
         if self.labels:
             if hps.clip_emb:
                 self.CLIP_path = hps.file2CLIP
+                # Load single CLIP.pickle file for image embeddings
+                clip_pickle_path = os.path.join(self.CLIP_path, 'CLIP.pickle')
+                if os.path.exists(clip_pickle_path):
+                    with open(clip_pickle_path, 'rb') as handle:
+                        CLIP_dict = pickle.load(handle)
+                    self.file2CLIP = CLIP_dict.get("image", {})
+                    print_all(f"Loaded {len(self.file2CLIP)} image CLIP embeddings from {clip_pickle_path}")
+                else:
+                    self.file2CLIP = {}
+                    print_all(f"Warning: CLIP.pickle not found at {clip_pickle_path}")
 
         requiredTypes = None
         self.filter(files, durations, requiredTypes)
@@ -106,19 +123,38 @@ class FilesAudioDataset(Dataset):
 
     def get_clip_metadata(self, fileName, test, offset=None):
         if self.image_clip_emb:
-            with open(os.path.join(self.CLIP_path, f'{fileName}.pickle'), 'rb') as handle:
-                clip_emb = pickle.load(handle)[fileName]
-            # clip_emb = self.file2CLIP[fileName]
-            frames_per_sec = 30.0 # (clip_emb.shape[0] / 10.0)
-            offset_in_sec, length_in_sec = offset / float(self.sr), self.sample_length / float(self.sr)
-            start = int(offset_in_sec * frames_per_sec)
-            end = int(start + length_in_sec*frames_per_sec)
-            sample_clip_emb = clip_emb[start:end+1]
-            mean_sample_clip_emb = np.mean(sample_clip_emb, axis=0)
-            if self.video_clip_emb:
-                return sample_clip_emb
+            # For image CLIP embeddings, load from pre-loaded dictionary
+            if fileName in self.file2CLIP:
+                clip_emb = self.file2CLIP[fileName]
+                # Image CLIP embeddings can be:
+                # - Single vector (512,) for one image
+                # - Array of vectors (N, 512) for multiple images of same class
+                if len(clip_emb.shape) == 1:
+                    # Single image embedding
+                    return clip_emb
+                elif len(clip_emb.shape) == 2:
+                    # Multiple images, use first one
+                    return clip_emb[0] if clip_emb.shape[0] > 0 else clip_emb.mean(axis=0)
+                else:
+                    raise ValueError(f"Unexpected CLIP embedding shape: {clip_emb.shape}")
             else:
-                return mean_sample_clip_emb
+                # Fallback: try loading individual pickle file (for video case)
+                pickle_path = os.path.join(self.CLIP_path, f'{fileName}.pickle')
+                if os.path.exists(pickle_path):
+                    with open(pickle_path, 'rb') as handle:
+                        clip_emb = pickle.load(handle)[fileName]
+                    frames_per_sec = 30.0
+                    offset_in_sec, length_in_sec = offset / float(self.sr), self.sample_length / float(self.sr)
+                    start = int(offset_in_sec * frames_per_sec)
+                    end = int(start + length_in_sec*frames_per_sec)
+                    sample_clip_emb = clip_emb[start:end+1]
+                    mean_sample_clip_emb = np.mean(sample_clip_emb, axis=0)
+                    if self.video_clip_emb:
+                        return sample_clip_emb
+                    else:
+                        return mean_sample_clip_emb
+                else:
+                    raise KeyError(f"CLIP embedding not found for {fileName}")
         else:
             return self.file2CLIP[int(fileName)]
 
@@ -126,6 +162,11 @@ class FilesAudioDataset(Dataset):
     def get_video_chunk(self, index, offset, test=False):
         filename, total_length = self.files[index], self.durations[index]
         data, sr = load_audio(filename, sr=self.sr, offset=offset, duration=self.sample_length)
+        if data.ndim == 1:
+            data = data[None, :]  # Add channel dimension
+        elif data.shape[0] != self.channels:
+            data = data[:self.channels, :]  # Keep first channels if multi-channel
+
         assert data.shape == (self.channels, self.sample_length), f'Expected {(self.channels, self.sample_length)}, got {data.shape}'
         if self.labels:
             if self.clip_emb:

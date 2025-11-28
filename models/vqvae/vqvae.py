@@ -170,6 +170,7 @@ class VQVAE(nn.Module):
 
         # Encode/Decode
         x_in = self.preprocess(x)
+        x_target = audio_postprocess(x.float(), hps)
         xs = []
         for level in range(self.levels):
             encoder = self.encoders[level]
@@ -181,7 +182,19 @@ class VQVAE(nn.Module):
         for level in range(self.levels):
             decoder = self.decoders[level]
             x_out = decoder(xs_quantised[level:level+1], all_levels=False)
-            assert_shape(x_out, x_in.shape)
+            x_out = self.postprocess(x_out)
+            x_out = audio_postprocess(x_out, hps)
+
+            # pad/truncate along time dimension to match input length exactly
+            target_T = x_target.shape[1]
+            if x_out.shape[1] != target_T:
+                diff = target_T - x_out.shape[1]
+                if diff > 0:
+                    pad = x_out.new_zeros(x_out.shape[0], diff, x_out.shape[2])
+                    x_out = t.cat((x_out, pad), dim=1)
+                else:
+                    x_out = x_out[:, :target_T, :]
+            assert_shape(x_out, x_target.shape)
             x_outs.append(x_out)
 
         # Loss
@@ -201,11 +214,8 @@ class VQVAE(nn.Module):
         recons_loss = t.zeros(()).to(x.device)
         spec_loss = t.zeros(()).to(x.device)
         multispec_loss = t.zeros(()).to(x.device)
-        x_target = audio_postprocess(x.float(), hps)
-
         for level in reversed(range(self.levels)):
-            x_out = self.postprocess(x_outs[level])
-            x_out = audio_postprocess(x_out, hps)
+            x_out = x_outs[level]
             this_recons_loss = _loss_fn(loss_fn, x_target, x_out, hps)
             this_spec_loss = _spectral_loss(x_target, x_out, hps)
             this_multispec_loss = _multispectral_loss(x_target, x_out, hps)

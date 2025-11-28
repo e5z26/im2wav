@@ -31,7 +31,7 @@ def calculate_bandwidth(dataset, hps, duration=600):
         if isinstance(x, (tuple, list)):
             x, y = x
         samples = x.astype(np.float64)
-        stft = librosa.core.stft(np.mean(samples, axis=1), hps.n_fft, hop_length=hps.hop_length, win_length=hps.window_size)
+        stft = librosa.core.stft(np.mean(samples, axis=1), n_fft=hps.n_fft, hop_length=hps.hop_length, win_length=hps.window_size)
         spec = np.absolute(stft)
         spec_norm_total += np.linalg.norm(spec)
         spec_nelem += 1
@@ -82,7 +82,16 @@ def audio_postprocess(x, hps):
     return x
 
 def stft(sig, hps):
-    return t.stft(sig, hps.n_fft, hps.hop_length, win_length=hps.window_size, window=t.hann_window(hps.window_size, device=sig.device))
+    """Torch stft wrapper that always requests complex output (PyTorch>=1.8)."""
+    window = t.hann_window(hps.window_size, device=sig.device)
+    return t.stft(
+        sig,
+        n_fft=hps.n_fft,
+        hop_length=hps.hop_length,
+        win_length=hps.window_size,
+        window=window,
+        return_complex=True,
+    )
 
 def spec(x, hps):
     return t.norm(stft(x, hps), p=2, dim=-1)

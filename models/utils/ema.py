@@ -41,7 +41,9 @@ class CPUEMA:
             if self.steps % self.freq == 0:
                 for i in range(len(self.state)):
                     p, state = self.state[i]
-                    state = torch.from_numpy(state).cuda()
+                    # Get device from parameter to support MPS, CUDA, or CPU
+                    device = p.data.device
+                    state = torch.from_numpy(state).to(device)
                     state.mul_(self.mu).add_(1 - self.mu, p.data.float())
                     self.state[i] = (p, state.cpu().numpy())
 

@@ -180,7 +180,7 @@ small_labelled_prior = Hyperparams(
     labels_v3=True,
     y_bins=(10,100), # Set this to (genres, artists) for your dataset
     max_bow_genre_size=1,
-    min_duration=2.05,
+    min_duration=None,
     max_duration=600.0,
     t_bins=64,
 )
@@ -192,7 +192,7 @@ mid_labelled_prior = Hyperparams(
     labels_v3=True,
     y_bins=(10,100), # Set this to (genres, artists) for your dataset
     max_bow_genre_size=1,
-    min_duration=2.05,
+    min_duration=None,
     max_duration=600.0,
     t_bins=64,
 )
